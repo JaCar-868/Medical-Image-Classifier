@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project implements a Convolutional Neural Network (CNN) to analyze medical images for detecting and diagnosing diseases. The CNN model is built using TensorFlow's Keras API and trained on a dataset of medical images.
+"This project implements a Convolutional Neural Network (CNN) to analyze medical images for detecting and diagnosing diseases. The CNN model is built using TensorFlow's Keras API and is trained on a dataset of medical images stored as PyTorch tensors. The data includes positive and negative samples, which are preprocessed and augmented to improve the model's performance. The model architecture consists of multiple convolutional and pooling layers followed by fully connected layers. The training process includes early stopping and model checkpointing to ensure optimal performance. After training, the model is evaluated on a validation set, and misclassified samples are visually inspected."
 
 ## Table of Contents
 
