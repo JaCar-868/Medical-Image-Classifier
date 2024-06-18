@@ -52,6 +52,19 @@ val_data = val_data / 255.0
 datagen = ImageDataGenerator(rotation_range=20, width_shift_range=0.2, height_shift_range=0.2, horizontal_flip=True)
 datagen.fit(train_data)
 
+# Visualize some sample images
+def plot_sample_images(data, labels, title, num_samples=5):
+    plt.figure(figsize=(15, 5))
+    for i in range(num_samples):
+        plt.subplot(1, num_samples, i + 1)
+        plt.imshow(data[i])
+        plt.title(f"{title} - {labels[i]}")
+        plt.axis('off')
+    plt.show()
+
+# Plot sample training images
+plot_sample_images(train_data, train_labels, "Training Image")
+
 # Model definition
 model = Sequential([
     Conv2D(32, (3, 3), activation='relu', input_shape=(224, 224, 3)),
