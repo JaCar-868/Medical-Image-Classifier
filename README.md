@@ -1,4 +1,4 @@
-# Medical-Image-Classifier using CNN
+# Medical-Image-Classifier using a CNN
 
 ## Overview
 
@@ -54,4 +54,4 @@ The model is trained using the Adam optimizer and binary cross-entropy loss func
 Contributions are welcome! If you have any improvements or suggestions, please create a pull request or open an issue to discuss them.
 
 ## License
-This project is licensed under the MIT License. See the [LICENSE](https://github.com/JaCar-868/Disease-Progression/blob/main/LICENSE) file for more details.
+This project is licensed under the MIT License. See the [LICENSE](https://github.com/JaCar-868/Medical-Image-Classifier/blob/main/LICENSE) file for more details.
