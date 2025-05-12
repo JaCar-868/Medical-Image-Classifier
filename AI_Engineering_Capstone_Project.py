@@ -1,122 +1,187 @@
-# AI_Engineering_Capstone_Project.py
+"""
+medical_image_classifier.py
+
+An improved medical image disease detector using transfer learning, tf.data pipelines,
+proper splitting, augmentation, callbacks, and evaluation metrics.
+"""
+
 import os
+import argparse
+import random
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.losses import SparseCategoricalCrossentropy
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
-import matplotlib.pyplot as plt
+from tensorflow.keras import layers, models, callbacks, applications, optimizers, metrics
 import torch
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix
 
-# Set seed for reproducibility
-np.random.seed(0)
-tf.random.set_seed(0)
+def set_seed(seed: int):
+    """Set seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
 
-# Load the data
-def load_data(directory, positive_dir, negative_dir):
-    positive_files = [os.path.join(directory, positive_dir, file) for file in os.listdir(os.path.join(directory, positive_dir)) if file.endswith(".pt")]
-    negative_files = [os.path.join(directory, negative_dir, file) for file in os.listdir(os.path.join(directory, negative_dir)) if file.endswith(".pt")]
+def gather_paths(data_dir):
+    """Collect .pt file paths and labels."""
+    pos_dir = os.path.join(data_dir, "Positive_tensors")
+    neg_dir = os.path.join(data_dir, "Negative_tensors")
+    pos_paths = [os.path.join(pos_dir, f) for f in os.listdir(pos_dir) if f.endswith('.pt')]
+    neg_paths = [os.path.join(neg_dir, f) for f in os.listdir(neg_dir) if f.endswith('.pt')]
+    paths = pos_paths + neg_paths
+    labels = [1] * len(pos_paths) + [0] * len(neg_paths)
+    return paths, labels
 
-    all_files = positive_files + negative_files
-    labels = np.array([1] * len(positive_files) + [0] * len(negative_files))
+def load_pt(path):
+    """Load a .pt file and return a HxWxC float32 numpy array."""
+    arr = torch.load(path.decode('utf-8')).numpy()
+    # assume arr is CxHxW; transpose to HxWxC
+    if arr.shape[0] <= 4:
+        arr = np.transpose(arr, (1, 2, 0))
+    return arr.astype(np.float32)
 
-    data = []
-    for file in all_files:
-        image = torch.load(file).numpy()  # Load the tensor and convert to numpy array
-        image = np.transpose(image, (1, 2, 0))  # Adjust dimensions if necessary
-        data.append(image)
-    data = np.array(data)
+def preprocess(path, label, img_size):
+    """TF wrapper to load and preprocess image, returns (image, label)."""
+    img = tf.numpy_function(func=load_pt, inp=[path], Tout=tf.float32)
+    img.set_shape([None, None, None])
+    # resize to square
+    img = tf.image.resize(img, [img_size, img_size])
+    # standardize each image
+    img = (img - tf.reduce_mean(img)) / (tf.math.reduce_std(img) + 1e-6)
+    return img, label
 
-    return data, labels
+def prepare_dataset(paths, labels, img_size, batch_size, training):
+    """Create a tf.data.Dataset from file paths and labels."""
+    ds = tf.data.Dataset.from_tensor_slices((paths, labels))
+    if training:
+        ds = ds.shuffle(buffer_size=len(paths))
+    ds = ds.map(lambda p, l: preprocess(p, l, img_size),
+                num_parallel_calls=tf.data.AUTOTUNE)
+    if training:
+        # on-the-fly augmentation
+        aug = tf.keras.Sequential([
+            layers.experimental.preprocessing.RandomFlip('horizontal'),
+            layers.experimental.preprocessing.RandomRotation(0.1),
+            layers.experimental.preprocessing.RandomZoom(0.1),
+            layers.experimental.preprocessing.RandomContrast(0.1),
+        ])
+        ds = ds.map(lambda x, y: (aug(x, training=True), y),
+                    num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    return ds
 
-# Directories and file paths
-directory = "/home/wsuser/work"
-positive_dir = "Positive_tensors"
-negative_dir = "Negative_tensors"
+def build_model(img_size, base_lr):
+    """Build a transfer-learning model for binary classification."""
+    inputs = layers.Input(shape=(img_size, img_size, 3))
+    # Assume grayscale if single-channel: repeat to 3 channels
+    def to_rgb(x):
+        if tf.shape(x)[-1] == 1:
+            return tf.image.grayscale_to_rgb(x)
+        return x
+    x = layers.Lambda(to_rgb)(inputs)
+    # data augmentation can be included here if desired
+    base = applications.ResNet50(
+        include_top=False,
+        weights='imagenet',
+        input_tensor=x,
+        pooling=None
+    )
+    base.trainable = False  # freeze pretrained weights
+    x = layers.GlobalAveragePooling2D()(base.output)
+    x = layers.BatchNormalization()(x)
+    x = layers.Dropout(0.5)(x)
+    outputs = layers.Dense(1, activation='sigmoid')(x)
+    model = models.Model(inputs, outputs)
+    model.compile(
+        optimizer=optimizers.Adam(learning_rate=base_lr),
+        loss='binary_crossentropy',
+        metrics=[
+            metrics.BinaryAccuracy(name='accuracy'),
+            metrics.AUC(name='auc'),
+            metrics.Precision(name='precision'),
+            metrics.Recall(name='recall')
+        ]
+    )
+    return model
 
-# Load training and validation data
-data, labels = load_data(directory, positive_dir, negative_dir)
+def main():
+    parser = argparse.ArgumentParser(description="Medical Image Disease Detector")
+    parser.add_argument('--data_dir', type=str, required=True,
+                        help="Root directory with Positive_tensors/ and Negative_tensors/")
+    parser.add_argument('--img_size', type=int, default=224,
+                        help="Image height and width after resizing")
+    parser.add_argument('--batch_size', type=int, default=32,
+                        help="Batch size for training and evaluation")
+    parser.add_argument('--epochs', type=int, default=50,
+                        help="Maximum number of training epochs")
+    parser.add_argument('--lr', type=float, default=1e-3,
+                        help="Base learning rate")
+    parser.add_argument('--seed', type=int, default=42,
+                        help="Random seed for reproducibility")
+    parser.add_argument('--test_size', type=float, default=0.1,
+                        help="Fraction of data to reserve for final testing")
+    parser.add_argument('--val_size', type=float, default=0.1,
+                        help="Fraction of data to reserve for validation")
+    parser.add_argument('--model_out', type=str, default='best_model.h5',
+                        help="Path to save the best model weights")
+    parser.add_argument('--log_dir', type=str, default='logs',
+                        help="TensorBoard log directory")
+    args = parser.parse_args()
 
-# Split into training and validation sets
-train_data, val_data = data[:30000], data[30000:]
-train_labels, val_labels = labels[:30000], labels[30000:]
+    set_seed(args.seed)
 
-# Preprocess the data
-train_data = train_data / 255.0
-val_data = val_data / 255.0
+    # gather and split data
+    paths, labels = gather_paths(args.data_dir)
+    train_paths, test_paths, train_labels, test_labels = train_test_split(
+        paths, labels, test_size=args.test_size, stratify=labels, random_state=args.seed
+    )
+    train_paths, val_paths, train_labels, val_labels = train_test_split(
+        train_paths, train_labels,
+        test_size=args.val_size / (1 - args.test_size),
+        stratify=train_labels, random_state=args.seed
+    )
 
-# Data augmentation
-datagen = ImageDataGenerator(rotation_range=20, width_shift_range=0.2, height_shift_range=0.2, horizontal_flip=True)
-datagen.fit(train_data)
+    # prepare datasets
+    train_ds = prepare_dataset(train_paths, train_labels, args.img_size,
+                               args.batch_size, training=True)
+    val_ds   = prepare_dataset(val_paths,   val_labels,   args.img_size,
+                               args.batch_size, training=False)
+    test_ds  = prepare_dataset(test_paths,  test_labels,  args.img_size,
+                               args.batch_size, training=False)
 
-# Visualize some sample images
-def plot_sample_images(data, labels, title, num_samples=5):
-    plt.figure(figsize=(15, 5))
-    for i in range(num_samples):
-        plt.subplot(1, num_samples, i + 1)
-        plt.imshow(data[i])
-        plt.title(f"{title} - {labels[i]}")
-        plt.axis('off')
-    plt.show()
+    # build and train model
+    model = build_model(args.img_size, args.lr)
+    cb_early = callbacks.EarlyStopping(
+        monitor='val_loss', patience=5, restore_best_weights=True
+    )
+    cb_reduce = callbacks.ReduceLROnPlateau(
+        monitor='val_loss', factor=0.5, patience=3, min_lr=1e-6
+    )
+    cb_ckpt = callbacks.ModelCheckpoint(
+        args.model_out, save_best_only=True, monitor='val_accuracy'
+    )
+    cb_tb = callbacks.TensorBoard(log_dir=args.log_dir)
 
-# Plot sample training images
-plot_sample_images(train_data, train_labels, "Training Image")
+    history = model.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=args.epochs,
+        callbacks=[cb_early, cb_reduce, cb_ckpt, cb_tb]
+    )
 
-# Model definition
-model = Sequential([
-    Conv2D(32, (3, 3), activation='relu', input_shape=(224, 224, 3)),
-    MaxPooling2D((2, 2)),
-    Conv2D(64, (3, 3), activation='relu'),
-    MaxPooling2D((2, 2)),
-    Conv2D(128, (3, 3), activation='relu'),
-    MaxPooling2D((2, 2)),
-    Flatten(),
-    Dense(256, activation='relu'),
-    Dropout(0.5),  # Add dropout for regularization
-    Dense(2, activation='softmax')
-])
+    # evaluation
+    print("\nEvaluating on test set:")
+    results = model.evaluate(test_ds, return_dict=True)
+    for name, value in results.items():
+        print(f"{name}: {value:.4f}")
 
-# Compile the model
-model.compile(optimizer=Adam(learning_rate=0.001),
-              loss=SparseCategoricalCrossentropy(from_logits=True),
-              metrics=['accuracy'])
+    # detailed classification report
+    y_true = np.concatenate([y for _, y in test_ds], axis=0)
+    y_pred_prob = model.predict(test_ds)
+    y_pred = (y_pred_prob.ravel() > 0.5).astype(int)
+    print("\nClassification Report:")
+    print(classification_report(y_true, y_pred, digits=4))
+    print("Confusion Matrix:")
+    print(confusion_matrix(y_true, y_pred))
 
-# Early stopping and model checkpoint callbacks
-early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-model_checkpoint = ModelCheckpoint('best_model.h5', monitor='val_accuracy', save_best_only=True, mode='max')
-
-# Train the model
-history = model.fit(datagen.flow(train_data, train_labels, batch_size=100),
-                    epochs=50,
-                    validation_data=(val_data, val_labels),
-                    callbacks=[early_stopping, model_checkpoint])
-
-# Plot training loss and validation accuracy
-plt.plot(history.history['loss'], label='loss')
-plt.plot(history.history['val_accuracy'], label='accuracy')
-plt.xlabel('Epoch')
-plt.ylabel('Value')
-plt.legend()
-plt.show()
-
-# Load the best model
-model.load_weights('best_model.h5')
-
-# Evaluate the model
-val_loss, val_accuracy = model.evaluate(val_data, val_labels)
-print(f'Validation accuracy: {val_accuracy:.2f}')
-
-# Plot some misclassified samples
-predictions = model.predict(val_data)
-predicted_labels = np.argmax(predictions, axis=1)
-
-count = 0
-for i in range(len(val_labels)):
-    if predicted_labels[i] != val_labels[i] and count < 4:
-        plt.imshow(val_data[i])
-        plt.title(f"Predicted: {predicted_labels[i]}, Actual: {val_labels[i]}")
-        plt.show()
-        count += 1
+if __name__ == "__main__":
+    main()
